@@ -28,7 +28,7 @@ def load_api_key(name: str):
 
 def _load_docs(pdf_root: str, doc_type: str) -> list[Document]:
     all_docs = []
-    for file in Path(pdf_root).glob("*.pdf"):
+    for file in Path(pdf_root).rglob("*.pdf"):
         brand = file.stem
         loader = PyPDFLoader(file, mode="page")
         doc = loader.load()
@@ -250,8 +250,73 @@ def render_graph_from_text(text: str) -> str:
             block = f"```json:graph\n{json_str}\n```"
             text = text.replace(block, f"\n{graph_output}\n")
 
-        except Exception:
-            pass
-            # print(f"Failed to render graph: {e}")
+        except Exception as e:
+            # pass
+            print(f"Failed to render graph: {e}")
 
     return text
+
+
+def render_text_with_graphs(text: str) -> list[dict[str, str]]:
+    """
+    Parses text for ```json:graph blocks, renders them with plotext,
+    and returns a list of segments:
+    [{"type": "text", "content": "..."}, {"type": "graph", "content": "..."}]
+    """
+    try:
+        import plotext as plt
+    except ImportError:
+        return [{"type": "text", "content": text}]
+
+    import re
+
+    # Regex to find json:graph blocks with capturing group for content
+    pattern = r"(```json:graph\n.*?\n```)"
+    # Split by the pattern. capture group implies we get [text, block, text, block, ...]
+    parts = re.split(pattern, text, flags=re.DOTALL)
+
+    segments = []
+
+    for part in parts:
+        if not part:
+            continue
+
+        if part.startswith("```json:graph"):
+            # Process graph block
+            try:
+                # Extract JSON content
+                json_str = part.replace("```json:graph\n", "").replace("\n```", "")
+                data = json.loads(json_str)
+
+                plt.clf()
+                plt.theme("dark")
+                plt.frame(True)
+                plt.grid(True)
+                plt.title(data.get("title", "Graph"))
+
+                graph_type = data.get("type", "line")
+                series_list = data.get("data", [])
+
+                for series in series_list:
+                    label = series.get("label", "")
+                    x = series.get("x", [])
+                    y = series.get("y", [])
+
+                    if graph_type == "bar":
+                        plt.bar(x, y, label=label)
+                    else:
+                        plt.plot(x, y, label=label)
+
+                graph_output = plt.build()
+                segments.append({"type": "graph", "content": graph_output})
+
+            except Exception as e:
+                print(f"[Graph Render Error]: {e}")
+                # Fallback: Treat as text code block if parsing fails
+                segments.append({"type": "text", "content": part})
+        else:
+            # Regular text
+            if part.strip():
+                segments.append({"type": "text", "content": part})
+
+    return segments

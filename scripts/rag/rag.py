@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from rich.console import Console
 from rich.markdown import Markdown
-from helper import render_graph_from_text
+from helper import render_text_with_graphs, docs_to_context
 
 ## argparse
 parser = argparse.ArgumentParser(description="rag test")
@@ -36,24 +36,6 @@ SCORE_THRESHOLD = 0.5
 embedding = OpenAIEmbeddings(
     model="text-embedding-3-large", api_key=OPENAI_API_KEY, chunk_size=100
 )
-
-
-def docs_to_context(docs: list[Document]) -> str:
-    parts = []
-    for d in docs:
-        brand = d.metadata.get("brand", "")
-        page = d.metadata.get("page", "")
-        source = d.metadata.get("source", "")
-        if source:
-            source = Path(source).name
-        meta = f"brand={brand}, source={source}, page={page}"
-        parts.append(
-            "<document>\n"
-            f"<meta>{meta}</meta>\n"
-            f"<content>{d.page_content}</content>\n"
-            "</document>"
-        )
-    return "\n".join(parts)
 
 
 def build_vector_store(store: bool) -> Chroma:
@@ -143,11 +125,18 @@ def chatting(vector_store: Chroma, system_prompt: str) -> None:
         response = llm.invoke(messages)
         t3 = time.perf_counter()
         answer = getattr(response, "content", "") or ""
-        answer = render_graph_from_text(answer)
+
+        segments = render_text_with_graphs(answer)
         if Console and Markdown:
-            Console().print(Markdown(f"**AI:** {answer}"))
+            Console().print(Markdown("**AI:**"))
+            for seg in segments:
+                if seg["type"] == "text":
+                    Console().print(Markdown(seg["content"]))
+                else:
+                    print(seg["content"])
         else:
             print(f"\nAI: {answer}")
+
         print(f"\n[timing] retrieval: {(t1 - t0):.3f}s, generation: {(t3 - t2):.3f}s")
         chat_history.append((user_input, answer))
 

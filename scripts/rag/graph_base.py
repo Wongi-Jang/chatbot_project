@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 
-from helper import build_vector_store, render_graph_from_text
+from helper import build_vector_store, render_text_with_graphs
 from state import GraphState
 from node import (
     routing,
@@ -260,9 +260,13 @@ if __name__ == "__main__":
         if args.answer:
             answer_text = _extract_answer_text(event)
             if answer_text is not None:
-                answer_text = render_graph_from_text(answer_text)
+                segments = render_text_with_graphs(answer_text)
                 if Console and Markdown:
-                    Console().print(Markdown(answer_text))
+                    for seg in segments:
+                        if seg["type"] == "text":
+                            Console().print(Markdown(seg["content"]))
+                        else:
+                            print(seg["content"])
                 else:
                     print(answer_text)
             continue
