@@ -2,7 +2,11 @@ import argparse
 from langgraph.graph import END, StateGraph, START
 from langgraph.checkpoint.memory import MemorySaver
 
-from helper import build_vector_store
+from rich.console import Console
+from rich.markdown import Markdown
+
+
+from helper import build_vector_store, render_graph_from_text
 from state import GraphState
 from node import (
     routing,
@@ -18,7 +22,13 @@ from node import (
     summarize,
     set_retriever_mode,
 )
-from conditions import decision, is_quit, should_retrieve, relevant_decision, support_decision
+from conditions import (
+    decision,
+    is_quit,
+    should_retrieve,
+    relevant_decision,
+    support_decision,
+)
 
 
 class PipelineManager:
@@ -179,7 +189,8 @@ if __name__ == "__main__":
         },
     )
     pipeline.add_edge("query_gen", "retrieve")
-    pipeline.add_edge("retrieve", "relevant")
+    pipeline.add_edge("retrieve", "rerank")
+    pipeline.add_edge("rerank", "relevant")
     pipeline.add_conditional_edges(
         "relevant",
         relevant_decision,
@@ -249,7 +260,11 @@ if __name__ == "__main__":
         if args.answer:
             answer_text = _extract_answer_text(event)
             if answer_text is not None:
-                print(answer_text)
+                answer_text = render_graph_from_text(answer_text)
+                if Console and Markdown:
+                    Console().print(Markdown(answer_text))
+                else:
+                    print(answer_text)
             continue
         if not args.summary and "summarize" in event.keys():
             continue
@@ -257,4 +272,3 @@ if __name__ == "__main__":
             continue
         if args.docs or "retrieve" not in event.keys():
             print(event)
-            

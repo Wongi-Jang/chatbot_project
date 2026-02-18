@@ -20,6 +20,9 @@ from helper import (
 from preprocess import docs_to_context, history_to_context
 from state import GraphState, ScoreSummary, RelevantSummary, SupportSummary
 
+from flashrank import Ranker, RerankRequest
+from rich.console import Console
+
 
 PROMPTS = load_prompts(str(Path(__file__).with_name("prompts.yaml")))
 VECTOR_DBS = build_vector_store(False)
@@ -57,9 +60,7 @@ def _get_parent_retrievers():
     global PARENT_RETRIEVERS
     if PARENT_RETRIEVERS is None:
         # print("initialize parent document retrievers...")
-        PARENT_RETRIEVERS = build_parent_retrievers(
-            force_rebuild=FORCE_REBUILD_PARENT
-        )
+        PARENT_RETRIEVERS = build_parent_retrievers(force_rebuild=FORCE_REBUILD_PARENT)
     return PARENT_RETRIEVERS
 
 
@@ -277,22 +278,46 @@ def supporting(state: GraphState) -> GraphState:
 
 def rerank(state: GraphState) -> GraphState:
     docs = state.get("docs_raw", [])
-    # if not docs:
-    #     return GraphState(docs="")
+    if not docs:
+        return GraphState(docs="")
 
-    # try:
-    #     from langchain_community.document_compressors import CohereRerank
-    # except Exception:
-    #     return GraphState(docs=docs_to_context(docs))
+    if Ranker is None:
+        if Console:
+            Console().print(
+                "[yellow]Flashrank not installed or failed to import, skipping rerank.[/yellow]"
+            )
+        return GraphState(docs=docs_to_context(docs))
 
-    # api_key = load_api_key("COHERE_API_KEY")
-    # if not api_key:
-    #     return GraphState(docs=docs_to_context(docs))
+    # Initialize Ranker (Using a small/fast model by default: ms-marco-MiniLM-L-12-v2)
+    try:
+        ranker = Ranker(
+            model_name="ms-marco-MiniLM-L-12-v2", cache_dir="./flashrank_cache"
+        )
+    except Exception as e:
+        if Console:
+            Console().print(f"[red]Flashrank init failed: {e}[/red]")
+        return GraphState(docs=docs_to_context(docs))
 
-    # reranker = CohereRerank(cohere_api_key=api_key, top_n=min(5, len(docs)))
-    # reranked = reranker.compress_documents(docs, query=state["question"])
-    # return GraphState(docs_raw=reranked, docs=docs_to_context(reranked))
-    return GraphState(docs_raw=docs, docs=docs_to_context(docs))
+    # Prepare input for Flashrank
+    passages = []
+    for i, doc in enumerate(docs):
+        passages.append({"id": str(i), "text": doc.page_content, "meta": doc.metadata})
+
+    rerank_request = RerankRequest(query=state["question"], passages=passages)
+    results = ranker.rerank(rerank_request)
+
+    # Reconstruct documents from reranked results
+    reranked_docs = []
+    for res in results:
+        meta = res.get("meta", {})
+        meta["rerank_score"] = res.get("score")
+        reranked_docs.append(Document(page_content=res["text"], metadata=meta))
+
+    # Take top K (e.g. 5)
+    reranked_docs = reranked_docs[:5]
+
+    return GraphState(docs_raw=reranked_docs, docs=docs_to_context(reranked_docs))
+
 
 def answering(state: GraphState) -> GraphState:
     llm = load_openai()

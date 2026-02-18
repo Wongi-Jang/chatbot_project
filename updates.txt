@@ -1,0 +1,11 @@
+rich (markdown, table)
+text embedding: chunk_size=100 (reduce token limit)
+glob -> rglob
+system prompt
+citation
+graph(?)
+rerank
+
+
+버거킹, 맥도날드 연매출 못 찾음
+한글 입력?

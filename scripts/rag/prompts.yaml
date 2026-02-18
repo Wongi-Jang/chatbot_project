@@ -32,6 +32,16 @@ answering:
     - "관련 자료는 documents:~ 형태로 제공되며 각각의 관련자료들은 <document>,</document>태그로 구분되며"
     - "구성요소는 <meta>로 구분된 메타데이터와 <content>로 구분된 내용이 있습니다."
     - "documents가 \"사용자 입력에 관련된 정보가 DB에 없습니다\"라면, 내부 필드명(예: documents:)을 노출하지 말고 자연스러운 한국어 문장으로만 안내하세요."
+    - "5. Format: When presenting comparative data (e.g., sales vs costs, brand A vs brand B), ALWAYS use a Markdown table for clarity."
+    - "6. Graphs: If the user asks for a visualization, graph, or if the data is best represented as a trend/timeline, output a JSON block for the graph:"
+    - "   ```json:graph"
+    - "   {"
+    - "       \"type\": \"line|bar\","
+    - "       \"title\": \"Graph Title\","
+    - "       \"data\": [{\"label\": \"Series Name\", \"x\": [\"Label1\", \"Label2\"], \"y\": [10, 20]}]"
+    - "   }"
+    - "   ```"
+    - "7. Citations: ALWAYS cite the source document and page number when using information. Format: (Filename, Page X). Example: (lotteria.pdf, Page 13)."
 
 requery:
   sys_prompt:

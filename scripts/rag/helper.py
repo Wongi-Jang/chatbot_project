@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 import os
-import time
+
 import json
 import shutil
 from langchain_community.document_loaders import PyPDFLoader
@@ -8,13 +8,20 @@ from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
-from langchain_openai import OpenAIEmbeddings,ChatOpenAI
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from langchain.retrievers import ParentDocumentRetriever
+
 EMBEDDING_MODEL = "text-embedding-3-large"
 STORAGE_PATH = "./Chroma_db"
 PDF_PATH = "./pdf_folder"
 LAW_PDF_PATH = f"{PDF_PATH}/law"
 FRANCHISE_PDF_PATH = f"{PDF_PATH}/franchise"
-def load_api_key(name:str):
+
+
+def load_api_key(name: str):
     load_dotenv()
     return os.getenv(name)
 
@@ -57,6 +64,7 @@ def build_vector_store(store: bool) -> dict[str, Chroma]:
     embedding = OpenAIEmbeddings(
         model="text-embedding-3-large",
         api_key=load_api_key("OPENAI_API_KEY"),
+        chunk_size=100,
     )
     collections = _collection_configs()
 
@@ -91,7 +99,9 @@ def build_vector_store(store: bool) -> dict[str, Chroma]:
     return stores
 
 
-def build_parent_retrievers(force_rebuild: bool = False) -> dict[str, "ParentDocumentRetriever"]:
+def build_parent_retrievers(
+    force_rebuild: bool = False,
+) -> dict[str, "ParentDocumentRetriever"]:
     from langchain.retrievers import ParentDocumentRetriever
     from langchain.storage import LocalFileStore
 
@@ -103,6 +113,7 @@ def build_parent_retrievers(force_rebuild: bool = False) -> dict[str, "ParentDoc
     embedding = OpenAIEmbeddings(
         model="text-embedding-3-large",
         api_key=load_api_key("OPENAI_API_KEY"),
+        chunk_size=100,
     )
     parent_splitter = RecursiveCharacterTextSplitter(
         chunk_size=2000,
@@ -162,13 +173,11 @@ def build_parent_retrievers(force_rebuild: bool = False) -> dict[str, "ParentDoc
         retrievers[key] = retriever
     return retrievers
 
-def load_openai(model ="gpt-4o-mini",temperature=0.5 ):
+
+def load_openai(model="gpt-4o-mini", temperature=0.5):
     OPENAI_API_KEY = load_api_key("OPENAI_API_KEY")
-    return ChatOpenAI(
-        model = model,
-        api_key = OPENAI_API_KEY,
-        temperature=temperature
-    )
+    return ChatOpenAI(model=model, api_key=OPENAI_API_KEY, temperature=temperature)
+
 
 def load_prompts(path: str) -> dict:
     if path.endswith((".yaml", ".yml")):
@@ -184,10 +193,65 @@ def load_prompts(path: str) -> dict:
             raw = yaml.safe_load(f)
         else:
             raw = json.load(f)
+
     def normalize(value):
         if isinstance(value, list):
             return "\n".join(value)
         if isinstance(value, dict):
             return {k: normalize(v) for k, v in value.items()}
         return value
+
     return normalize(raw)
+
+
+def render_graph_from_text(text: str) -> str:
+    """
+    Parses text for ```json:graph blocks, renders them with plotext,
+    and replaces the block with the rendered graph.
+    """
+    try:
+        import plotext as plt
+    except ImportError:
+        return text
+
+    import re
+
+    # Regex to find json:graph blocks
+    pattern = r"```json:graph\n(.*?)\n```"
+    matches = re.findall(pattern, text, re.DOTALL)
+
+    for json_str in matches:
+        try:
+            data = json.loads(json_str)
+            plt.clf()
+            plt.theme("dark")
+            plt.frame(True)
+            plt.grid(True)
+
+            # Common setup
+            plt.title(data.get("title", "Graph"))
+
+            graph_type = data.get("type", "line")
+            series_list = data.get("data", [])
+
+            for series in series_list:
+                label = series.get("label", "")
+                x = series.get("x", [])
+                y = series.get("y", [])
+
+                if graph_type == "bar":
+                    plt.bar(x, y, label=label)
+                else:
+                    plt.plot(x, y, label=label)
+
+            graph_output = plt.build()
+
+            # Replace the code block with the rendered graph
+            block = f"```json:graph\n{json_str}\n```"
+            text = text.replace(block, f"\n{graph_output}\n")
+
+        except Exception:
+            pass
+            # print(f"Failed to render graph: {e}")
+
+    return text
