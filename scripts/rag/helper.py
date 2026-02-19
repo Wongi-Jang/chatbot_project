@@ -74,6 +74,10 @@ def build_vector_store(store: bool) -> dict[str, Chroma]:
         print("store new data to Chroma DB")
         for key, cfg in collections.items():
             all_docs = _load_docs(cfg["pdf_path"], cfg["doc_type"])
+            print(f"Loaded {len(all_docs)} documents for {key}")
+            if not all_docs:
+                print(f"Warning: No documents found for {key} in {cfg['pdf_path']}")
+                continue
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=800,
                 chunk_overlap=128,
@@ -81,6 +85,10 @@ def build_vector_store(store: bool) -> dict[str, Chroma]:
                 is_separator_regex=False,
             )
             tokens = text_splitter.split_documents(all_docs)
+            print(f"Split into {len(tokens)} tokens for {key}")
+            if not tokens:
+                print(f"Warning: No tokens created for {key}")
+                continue
             stores[key] = Chroma.from_documents(
                 documents=tokens,
                 collection_name=cfg["collection"],
@@ -204,75 +212,23 @@ def load_prompts(path: str) -> dict:
     return normalize(raw)
 
 
-def render_graph_from_text(text: str) -> str:
-    """
-    Parses text for ```json:graph blocks, renders them with plotext,
-    and replaces the block with the rendered graph.
-    """
-    try:
-        import plotext as plt
-    except ImportError:
-        return text
-
-    import re
-
-    # Regex to find json:graph blocks
-    pattern = r"```json:graph\n(.*?)\n```"
-    matches = re.findall(pattern, text, re.DOTALL)
-
-    for json_str in matches:
-        try:
-            data = json.loads(json_str)
-            plt.clf()
-            plt.theme("dark")
-            plt.frame(True)
-            plt.grid(True)
-
-            # Common setup
-            plt.title(data.get("title", "Graph"))
-
-            graph_type = data.get("type", "line")
-            series_list = data.get("data", [])
-
-            for series in series_list:
-                label = series.get("label", "")
-                x = series.get("x", [])
-                y = series.get("y", [])
-
-                if graph_type == "bar":
-                    plt.bar(x, y, label=label)
-                else:
-                    plt.plot(x, y, label=label)
-
-            graph_output = plt.build()
-
-            # Replace the code block with the rendered graph
-            block = f"```json:graph\n{json_str}\n```"
-            text = text.replace(block, f"\n{graph_output}\n")
-
-        except Exception as e:
-            # pass
-            print(f"Failed to render graph: {e}")
-
-    return text
-
-
 def render_text_with_graphs(text: str) -> list[dict[str, str]]:
     """
     Parses text for ```json:graph blocks, renders them with plotext,
     and returns a list of segments:
     [{"type": "text", "content": "..."}, {"type": "graph", "content": "..."}]
     """
-    try:
-        import plotext as plt
-    except ImportError:
-        return [{"type": "text", "content": text}]
+    # try:
+    #     import plotext as plt
+    # except ImportError:
+    #     return [{"type": "text", "content": text}]
 
     import re
 
     # Regex to find json:graph blocks with capturing group for content
-    pattern = r"(```json:graph\n.*?\n```)"
-    # Split by the pattern. capture group implies we get [text, block, text, block, ...]
+    # Regex to find graph blocks (supports json:graph, json, or just ``` with type: "line"|"bar" inside)
+    # This is a bit complex to do with a single split, so we'll look for code blocks and inspect them.
+    pattern = r"(```(?:json|json:graph)?\n.*?\n```)"
     parts = re.split(pattern, text, flags=re.DOTALL)
 
     segments = []
@@ -281,38 +237,27 @@ def render_text_with_graphs(text: str) -> list[dict[str, str]]:
         if not part:
             continue
 
-        if part.startswith("```json:graph"):
-            # Process graph block
+        if part.startswith("```"):
+            # Check if it's a graph block
+            is_graph = False
+            json_str = ""
+
             try:
-                # Extract JSON content
-                json_str = part.replace("```json:graph\n", "").replace("\n```", "")
-                data = json.loads(json_str)
+                # Remove fences
+                content = re.sub(r"^```(?:json|json:graph)?\n", "", part)
+                content = re.sub(r"\n```$", "", content)
+                json_str = content.strip()
 
-                plt.clf()
-                plt.theme("dark")
-                plt.frame(True)
-                plt.grid(True)
-                plt.title(data.get("title", "Graph"))
+                # Check if it looks like our graph schema
+                if '"type":' in json_str and '"data":' in json_str:
+                    is_graph = True
+            except Exception:
+                pass
 
-                graph_type = data.get("type", "line")
-                series_list = data.get("data", [])
-
-                for series in series_list:
-                    label = series.get("label", "")
-                    x = series.get("x", [])
-                    y = series.get("y", [])
-
-                    if graph_type == "bar":
-                        plt.bar(x, y, label=label)
-                    else:
-                        plt.plot(x, y, label=label)
-
-                graph_output = plt.build()
-                segments.append({"type": "graph", "content": graph_output})
-
-            except Exception as e:
-                print(f"[Graph Render Error]: {e}")
-                # Fallback: Treat as text code block if parsing fails
+            if is_graph:
+                # Use the raw JSON string for the frontend to parse and render
+                segments.append({"type": "graph_json", "content": json_str})
+            else:
                 segments.append({"type": "text", "content": part})
         else:
             # Regular text

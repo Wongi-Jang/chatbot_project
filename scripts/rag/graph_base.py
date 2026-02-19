@@ -99,6 +99,117 @@ def _extract_answer_text(event: dict) -> str | None:
     return None
 
 
+def create_graph(
+    enable_scoring: bool = False,
+    retriever_mode: str = "basic",
+    force_rebuild_parent: bool = False,
+    is_interactive: bool = True,
+) -> object:
+    set_retriever_mode(
+        retriever_mode,
+        force_rebuild_parent=force_rebuild_parent,
+    )
+
+    nodes = {
+        "routing": routing,
+        "query_gen": query_gen,
+        "retrieve": retrieve,
+        "rerank": rerank,
+        "relevant": relevant,
+        "supporting": supporting,
+        "answer": answering,
+        "requery": requery,
+        "user_input": user_input,
+        "summarize": summarize,
+    }
+    if enable_scoring:
+        nodes["scoring"] = scoring
+
+    pipeline = PipelineManager(GraphState, nodes)
+
+    pipeline.add_edge(START, "user_input")
+
+    pipeline.add_conditional_edges(
+        "user_input",
+        is_quit,
+        {
+            True: END,
+            False: "routing",
+        },
+    )
+    pipeline.add_conditional_edges(
+        "routing",
+        should_retrieve,
+        {
+            True: "query_gen",
+            False: "answer",
+        },
+    )
+    pipeline.add_edge("query_gen", "retrieve")
+    pipeline.add_edge("retrieve", "rerank")
+    pipeline.add_edge("rerank", "relevant")
+    pipeline.add_conditional_edges(
+        "relevant",
+        relevant_decision,
+        {
+            "answer": "answer",
+            "requery": "requery",
+        },
+    )
+    if enable_scoring:
+        pipeline.add_conditional_edges(
+            "answer",
+            should_retrieve,
+            {
+                True: "supporting",
+                False: "scoring",
+            },
+        )
+        pipeline.add_conditional_edges(
+            "supporting",
+            support_decision,
+            {
+                "answer": "answer",
+                "scoring": "scoring",
+            },
+        )
+        pipeline.add_conditional_edges(
+            "scoring",
+            decision,
+            {
+                "end": "summarize",
+                "requery": "requery",
+            },
+        )
+    else:
+        pipeline.add_conditional_edges(
+            "answer",
+            should_retrieve,
+            {
+                True: "supporting",
+                False: "summarize",
+            },
+        )
+        pipeline.add_conditional_edges(
+            "supporting",
+            support_decision,
+            {
+                "answer": "answer",
+                "scoring": "summarize",
+            },
+        )
+    if is_interactive:
+        pipeline.add_edge("summarize", "user_input")
+    else:
+        pipeline.add_edge("summarize", END)
+
+    pipeline.add_edge("requery", "retrieve")
+
+    memory = MemorySaver()
+    app = pipeline.compile(checkpointer=memory)
+    return app
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="graph pipeline")
     parser.add_argument("--store", action="store_true", help="initialize Chroma DB")
@@ -148,105 +259,18 @@ if __name__ == "__main__":
         build_vector_store(True)
         raise SystemExit(0)
 
-    set_retriever_mode(
-        args.retriever,
+    app = create_graph(
+        enable_scoring=args.scoring,
+        retriever_mode=args.retriever,
         force_rebuild_parent=args.rebuild_parent,
     )
-
-    nodes = {
-        "routing": routing,
-        "query_gen": query_gen,
-        "retrieve": retrieve,
-        "rerank": rerank,
-        "relevant": relevant,
-        "supporting": supporting,
-        "answer": answering,
-        "requery": requery,
-        "user_input": user_input,
-        "summarize": summarize,
-    }
-    if args.scoring:
-        nodes["scoring"] = scoring
-
-    pipeline = PipelineManager(GraphState, nodes)
-
-    pipeline.add_edge(START, "user_input")
-
-    pipeline.add_conditional_edges(
-        "user_input",
-        is_quit,
-        {
-            True: END,
-            False: "routing",
-        },
-    )
-    pipeline.add_conditional_edges(
-        "routing",
-        should_retrieve,
-        {
-            True: "query_gen",
-            False: "answer",
-        },
-    )
-    pipeline.add_edge("query_gen", "retrieve")
-    pipeline.add_edge("retrieve", "rerank")
-    pipeline.add_edge("rerank", "relevant")
-    pipeline.add_conditional_edges(
-        "relevant",
-        relevant_decision,
-        {
-            "answer": "answer",
-            "requery": "requery",
-        },
-    )
-    if args.scoring:
-        pipeline.add_conditional_edges(
-            "answer",
-            should_retrieve,
-            {
-                True: "supporting",
-                False: "scoring",
-            },
-        )
-        pipeline.add_conditional_edges(
-            "supporting",
-            support_decision,
-            {
-                "answer": "answer",
-                "scoring": "scoring",
-            },
-        )
-        pipeline.add_conditional_edges(
-            "scoring",
-            decision,
-            {
-                "end": "summarize",
-                "requery": "requery",
-            },
-        )
-    else:
-        pipeline.add_conditional_edges(
-            "answer",
-            should_retrieve,
-            {
-                True: "supporting",
-                False: "summarize",
-            },
-        )
-        pipeline.add_conditional_edges(
-            "supporting",
-            support_decision,
-            {
-                "answer": "answer",
-                "scoring": "summarize",
-            },
-        )
-    pipeline.add_edge("summarize", "user_input")
-    pipeline.add_edge("requery", "retrieve")
-
-    memory = MemorySaver()
-    app = pipeline.compile(checkpointer=memory)
-    pipeline.save_png("graph_img.png")
+    try:
+        img_data = app.get_graph().draw_mermaid_png()
+        with open("graph_img.png", "wb") as f:
+            f.write(img_data)
+        print("그래프 이미지가 저장되었습니다!")
+    except Exception as e:
+        print(f"시각화 실패: {e}")
     config = {
         "configurable": {"thread_id": "user_session_1"},
         "recursion_limit": args.max_nodes,

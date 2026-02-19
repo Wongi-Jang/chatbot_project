@@ -104,7 +104,9 @@ def vector_db_metadata_tool(sample_size: int = 10) -> dict:
 
 
 def user_input(state: GraphState) -> GraphState:
-    question = input("You:").strip()
+    question = state.get("question", "").strip()
+    if not question:
+        question = input("You:").strip()
     # Reset per-question transient states to avoid cross-turn carryover.
     return GraphState(
         question=question,
@@ -205,8 +207,14 @@ def retrieve(state: GraphState) -> GraphState:
                 continue
             docs_with_scores.extend(_retrieve_from_db(q, db_key))
         docs_with_scores.sort(key=lambda x: x[1], reverse=True)
+        docs_with_scores.sort(key=lambda x: x[1], reverse=True)
         docs = [d for d, _s in docs_with_scores]
-    return GraphState(docs_raw=docs, docs=docs_to_context(docs))
+
+    # Convert Documents to dicts for serialization
+    docs_dicts = [
+        {"page_content": d.page_content, "metadata": d.metadata} for d in docs
+    ]
+    return GraphState(docs_raw=docs_dicts, docs=docs_to_context(docs_dicts))
 
 
 def relevant(state: GraphState) -> GraphState:
@@ -301,17 +309,29 @@ def rerank(state: GraphState) -> GraphState:
     # Prepare input for Flashrank
     passages = []
     for i, doc in enumerate(docs):
-        passages.append({"id": str(i), "text": doc.page_content, "meta": doc.metadata})
+        # Handle both dict and Document (though retrieve should produce dicts now)
+        if isinstance(doc, dict):
+            text = doc.get("page_content", "")
+            meta = doc.get("metadata", {})
+        else:
+            text = doc.page_content
+            meta = doc.metadata
+
+        passages.append({"id": str(i), "text": text, "meta": meta})
 
     rerank_request = RerankRequest(query=state["question"], passages=passages)
     results = ranker.rerank(rerank_request)
 
-    # Reconstruct documents from reranked results
+    # Reconstruct documents from reranked results as dicts
     reranked_docs = []
     for res in results:
         meta = res.get("meta", {})
-        meta["rerank_score"] = res.get("score")
-        reranked_docs.append(Document(page_content=res["text"], metadata=meta))
+        # Flashrank returns numpy float32, which is not msgpack serializable
+        score = res.get("score")
+        if score is not None:
+            score = float(score)
+        meta["rerank_score"] = score
+        reranked_docs.append({"page_content": res["text"], "metadata": meta})
 
     # Take top K (e.g. 5)
     reranked_docs = reranked_docs[:5]

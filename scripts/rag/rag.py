@@ -132,6 +132,36 @@ def chatting(vector_store: Chroma, system_prompt: str) -> None:
             for seg in segments:
                 if seg["type"] == "text":
                     Console().print(Markdown(seg["content"]))
+                elif seg["type"] == "graph_json":
+                    # Render JSON graph for CLI using plotext
+                    try:
+                        import json
+                        import plotext as plt
+
+                        data = json.loads(seg["content"])
+                        plt.clf()
+                        plt.theme("dark")
+                        plt.frame(True)
+                        plt.grid(True)
+                        plt.title(data.get("title", "Graph"))
+
+                        graph_type = data.get("type", "line")
+                        series_list = data.get("data", [])
+
+                        for series in series_list:
+                            label = series.get("label", "")
+                            x = series.get("x", [])
+                            y = series.get("y", [])
+
+                            if graph_type == "bar":
+                                plt.bar(x, y, label=label)
+                            else:
+                                plt.plot(x, y, label=label)
+
+                        plt.show()
+                    except Exception as e:
+                        print(f"Failed to render graph: {e}")
+                        print(seg["content"])
                 else:
                     print(seg["content"])
         else:

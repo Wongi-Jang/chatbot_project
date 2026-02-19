@@ -3,7 +3,6 @@ text embedding: chunk_size=100 (reduce token limit)
 glob -> rglob
 system prompt
 citation
-graph(?)
 rerank
 
 

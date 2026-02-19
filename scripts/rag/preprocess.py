@@ -2,19 +2,26 @@ from langchain_core.documents import Document
 from pathlib import Path
 
 
-def docs_to_context(docs: list[Document]) -> str:
+def docs_to_context(docs: list[Document | dict]) -> str:
     parts = []
     for d in docs:
-        brand = d.metadata.get("brand", "")
-        page = d.metadata.get("page", "")
-        source = d.metadata.get("source", "")
+        if isinstance(d, dict):
+            metadata = d.get("metadata", {})
+            page_content = d.get("page_content", "")
+        else:
+            metadata = d.metadata
+            page_content = d.page_content
+
+        brand = metadata.get("brand", "")
+        page = metadata.get("page", "")
+        source = metadata.get("source", "")
         if source:
             source = Path(source).name
         meta = f"brand={brand}, source={source}, page={page}"
         parts.append(
             "<document>\n"
             f"<meta>{meta}</meta>\n"
-            f"<content>{d.page_content}</content>\n"
+            f"<content>{page_content}</content>\n"
             "</document>"
         )
     return "\n".join(parts)
