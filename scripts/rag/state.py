@@ -1,4 +1,4 @@
-from typing import TypedDict, Annotated
+from typing import TypedDict, Annotated, Any
 import operator
 from pydantic import BaseModel, Field
 
@@ -32,15 +32,29 @@ class SupportSummary(BaseModel):
     )
 
 
+class FranchiseQuery(BaseModel):
+    query: str = Field(description="프랜차이즈 DB 검색용 개별 쿼리 문자열")
+    brand: str = Field(
+        description="이 쿼리가 검색할 특정 브랜드명. 여러 브랜드를 비교할 때는 각 쿼리마다 해당 브랜드 하나만 지정하세요. (없으면 빈 문자열)",
+        default="",
+    )
+
+
 class QuerySummary(BaseModel):
     law_query: list[str] = Field(description="법령 DB 검색용 쿼리 목록")
-    franchise_query: list[str] = Field(description="프랜차이즈 DB 검색용 쿼리 목록")
+    franchise_query: list[FranchiseQuery] = Field(
+        description="프랜차이즈 DB 검색용 쿼리 및 대상 브랜드 목록"
+    )
+    target_brands: list[str] = Field(
+        description="질문에서 언급된 타겟 프랜차이즈 브랜드 이름 목록 (없으면 빈 리스트)",
+        default_factory=list,
+    )
 
 
 class GraphState(TypedDict):
     question: Annotated[str, "user question"]
     # query: Annotated[dict, "retrieval queries by db type"]
-    query: Annotated[dict[str, list[str]], "retrieval queries by db type"]
+    query: Annotated[dict[str, list[Any]], "retrieval queries by db type"]
     docs_raw: Annotated[list, "retrieved documents raw grouped by query"]
     # docs: Annotated[str, "retrieved docs grouped by query"]
     docs: Annotated[dict[str, str], "retrieved docs context grouped by query"]
@@ -67,3 +81,4 @@ class GraphState(TypedDict):
     supporting_feedback: Annotated[str, "text feedback from supporting/scoring nodes"]
     ispass: Annotated[str, "d"]
     no_docs: Annotated[bool, "no relevant docs available for current question"]
+    target_brands: Annotated[list[str], "target brand names for franchise db filter"]

@@ -90,6 +90,7 @@ def user_input(state: GraphState) -> GraphState:
         supporting_feedback="",
         ispass="",
         no_docs=False,
+        target_brands=[],
     )
 
 
@@ -123,6 +124,7 @@ def routing(state: GraphState) -> GraphState:
         query_state={},
         relevant_feedback={},
         supporting_feedback="",
+        target_brands=[],
     )
     return next_state
 
@@ -148,32 +150,71 @@ def query_gen(state: GraphState) -> GraphState:
     return GraphState(
         query={
             "law": parsed.law_query,
-            "franchise": parsed.franchise_query,
-        }
+            "franchise": [fq.model_dump() for fq in parsed.franchise_query],
+        },
+        target_brands=parsed.target_brands,
     )
 
 
 def _retrieve_docs(
-    query: str, db_key: str, k: int = 3, score_threshold: float = 0.5
+    query: str,
+    db_key: str,
+    k: int = 3,
+    score_threshold: float = 0.5,
+    filter: dict | None = None,
 ) -> list[tuple]:
     retriever = get_retrievers().get(db_key)
     if retriever is None:
         return []
+    if filter:
+        return retriever.invoke(
+            query, k=k, score_threshold=score_threshold, filter=filter
+        )
     return retriever.invoke(query, k=k, score_threshold=score_threshold)
 
 
 def retrieve(state: GraphState) -> GraphState:
     queries = state.get("query", {}) or {}
+    target_brands = state.get("target_brands", []) or []
+
+    franchise_filter = None
+    if target_brands:
+        if len(target_brands) == 1:
+            franchise_filter = {"brand": target_brands[0]}
+        else:
+            franchise_filter = {"brand": {"$in": target_brands}}
+
     docs_with_scores: dict[str, list[tuple]] = {}
     for db_key, query_list in queries.items():
         if not query_list:
             continue
         if not isinstance(query_list, list):
             continue
-        for q in query_list:
-            if not isinstance(q, str) or not q.strip():
+
+        for q_item in query_list:
+            q_str = ""
+            current_filter = None
+
+            if isinstance(q_item, dict):
+                q_str = q_item.get("query", "")
+                brand = q_item.get("brand", "")
+                if brand and db_key == "franchise":
+                    current_filter = {"brand": brand}
+                elif db_key == "franchise" and target_brands:
+                    if len(target_brands) == 1:
+                        current_filter = {"brand": target_brands[0]}
+                    else:
+                        current_filter = {"brand": {"$in": target_brands}}
+            elif isinstance(q_item, str):
+                q_str = q_item
+                current_filter = franchise_filter if db_key == "franchise" else None
+
+            if not isinstance(q_str, str) or not q_str.strip():
                 continue
-            docs_with_scores.setdefault(q, []).extend(_retrieve_docs(q, db_key))
+
+            docs_with_scores.setdefault(q_str, []).extend(
+                _retrieve_docs(q_str, db_key, filter=current_filter)
+            )
 
     docs: dict[str, list[Document]] = {}
     for q, pairs in docs_with_scores.items():
@@ -476,20 +517,43 @@ def requery(state: GraphState) -> GraphState:
     prev_queries = state.get("query", {}) or {}
     query_state = state.get("query_state", {}) or {}
 
-    def _merge_with_relevant_existing(db_key: str, new_queries: list[str]) -> list[str]:
+    def _merge_with_relevant_existing(db_key: str, new_queries: list) -> list:
         base = prev_queries.get(db_key, []) if isinstance(prev_queries, dict) else []
         if not isinstance(base, list):
             base = []
+
+        def get_q_str(item):
+            return item.get("query", "") if isinstance(item, dict) else item
+
         rel_existing = [
-            q
-            for q in base
-            if isinstance(q, str) and q.strip() and bool(query_state.get(q, False))
+            item
+            for item in base
+            if isinstance(get_q_str(item), str)
+            and get_q_str(item).strip()
+            and bool(query_state.get(get_q_str(item), False))
         ]
-        merged = rel_existing + [
-            q for q in new_queries if isinstance(q, str) and q.strip()
-        ]
-        # preserve order while deduping
-        return list(dict.fromkeys(merged))
+
+        merged = rel_existing + new_queries
+
+        seen = set()
+        deduped = []
+        for item in merged:
+            q_str = get_q_str(item)
+            if not isinstance(q_str, str) or not q_str.strip():
+                continue
+            if q_str not in seen:
+                seen.add(q_str)
+                if hasattr(item, "model_dump"):
+                    deduped.append(item.model_dump())
+                else:
+                    deduped.append(item)
+        return deduped
+
+    prev_target_brands = state.get("target_brands", []) or []
+    if isinstance(prev_target_brands, list) and isinstance(parsed.target_brands, list):
+        merged_brands = list(dict.fromkeys(prev_target_brands + parsed.target_brands))
+    else:
+        merged_brands = prev_target_brands
 
     return GraphState(
         query={
@@ -497,7 +561,8 @@ def requery(state: GraphState) -> GraphState:
             "franchise": _merge_with_relevant_existing(
                 "franchise", parsed.franchise_query
             ),
-        }
+        },
+        target_brands=merged_brands,
     )
 
 

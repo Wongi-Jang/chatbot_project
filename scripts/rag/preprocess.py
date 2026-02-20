@@ -97,16 +97,22 @@ def build_requery_inputs(
         q_list = queries.get(key, []) if isinstance(queries, dict) else []
         if not isinstance(q_list, list):
             q_list = []
-        normalized = [q.strip() for q in q_list if isinstance(q, str) and q.strip()]
+        normalized = []
+        for q in q_list:
+            q_str = q.get("query", "") if isinstance(q, dict) else q
+            if isinstance(q_str, str) and q_str.strip():
+                normalized.append(q)
+
         if not normalized:
             continue
 
-        rel_queries: list[str] = []
-        irrel_queries: list[str] = []
+        rel_queries = []
+        irrel_queries = []
         feedback_lines: list[str] = []
         for q in normalized:
+            q_str = q.get("query", "") if isinstance(q, dict) else q
             is_rel = (
-                bool(query_state.get(q, False))
+                bool(query_state.get(q_str, False))
                 if isinstance(query_state, dict)
                 else False
             )
@@ -115,9 +121,11 @@ def build_requery_inputs(
                 continue
             irrel_queries.append(q)
             if isinstance(relevant_feedback, dict):
-                raw_fb = relevant_feedback.get(q, "")
+                raw_fb = relevant_feedback.get(q_str, "")
                 if isinstance(raw_fb, str) and raw_fb.strip():
-                    feedback_lines.append(f"[query] {q}\n[feedback] {raw_fb.strip()}")
+                    feedback_lines.append(
+                        f"[query] {q_str}\n[feedback] {raw_fb.strip()}"
+                    )
 
         payload[key]["rel_queries"] = json.dumps(rel_queries, ensure_ascii=False)
         payload[key]["irrel_queries"] = json.dumps(irrel_queries, ensure_ascii=False)
