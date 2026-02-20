@@ -1,14 +1,14 @@
 query_gen:
   template:
     - "당신은 검색 시스템의 전처리 전문가입니다. 사용자의 질문을 분석하여 지식 베이스(Vector DB)에서 가장 관련성 높은 문서를 찾을 수 있도록 최적의 검색 쿼리로 재작성하는 것이 임무입니다."
-    - "지식베이스에는 프렌차이즈 표준계약서,가맹사업법,프랜차이즈들의 정보공개서가 있습니다.사용자의 의도를 파악하여 핵심키워드는 보존하며 추상적인 질문은 여러개의 구체적인 쿼리로 분해하세요. 한국어 검색의 특성을 고려하여, 전문 용어나 대체 가능한 동의어를 포함하세요."
+    - "지식베이스에는 프렌차이즈 표준계약서,가맹사업법,프랜차이즈들의 정보공개서가 있습니다. 사용자의 의도를 파악해 핵심 키워드를 보존하고 한국어 검색 특성을 반영해 전문 용어/동의어를 포함하세요."
     - "대화 이력(history)이 제공되면 현재 질문의 지시어/생략어(예: 그거, 이전 조건)를 해석하는 데 활용하되, 최종 쿼리는 반드시 현재 질문에 직접적으로 대응하도록 작성하세요."
+    - "query는 최대한 개별적인 정보들을 담고 있도록 하며 query의 개수는 최대 3개입니다."
+    - "출력 규칙: law_query/franchise_query는 각각 문자열 배열(list)이어야 합니다."
     - "[대화 이력]:{history}"
     - "이 지침에 따라 {user_question}을 적절한 쿼리로 변환하세요. 꼭 필요한 경우에만 지식 베이스를 참고하세요."
-    - "출력은 반드시 JSON 한 줄로만 하세요. 예시:"
-    - "{{\"law\": \"...\", \"franchise\": \"...\"}}"
-    - "{{\"law\": \"...\", \"franchise\": \"\"}}"
-    - "{{\"law\": \"\", \"franchise\": \"...\"}}"
+    - "출력은 반드시 JSON 한 줄만 반환하세요."
+    - "[Format]:{format}"
 
 scoring:
   sys_message:
@@ -45,17 +45,23 @@ answering:
 
 requery:
   sys_prompt:
-    - "당신은 검색 시스템의 전처리 전문가입니다. 사용자의 질문을 분석하여 지식 베이스(Vector DB)에서 가장 관련성 높은 문서를 찾을 수 있도록 기존 검색 쿼리를 개선하는 것이 임무입니다."
-    - "지식베이스에는 프렌차이즈 표준계약서,가맹사업법,프랜차이즈들의 정보공개서가 있습니다. 사용자의 의도를 파악하여 핵심 키워드는 보존하고, 피드백에서 지적된 문제(모호성/누락/비관련성)를 해소하도록 쿼리를 재작성하세요."
-    - "추상적인 질문은 여러 개의 구체적인 쿼리로 분해하고, 한국어 검색 특성을 고려해 전문 용어와 대체 가능한 동의어를 포함하세요."
-    - "기존 쿼리 구조(law/franchise 키)는 유지하되, 필요 없는 항목은 빈 문자열로 두세요."
-    - "[기존 query]: {prev_query}"
+    - "당신은 검색 쿼리 개선 전문가입니다. 목표는 사용자 질문에 더 직접적으로 맞는 재검색 쿼리를 만드는 것입니다."
+    - "입력은 DB 타입별로 rel_query(이미 유효한 쿼리)와 irrel_query+feedback(개선 대상)로 제공됩니다."
+    - "출력 규칙:"
+    - "1) 각 타입(law/franchise)은 독립적으로 처리하세요."
+    - "2) 새 쿼리는 해당 타입의 rel_query와 의미적으로 중복되지 않아야 합니다."
+    - "3) irrel_queries가 비어 있으면 해당 타입 결과는 빈 배열([])로 두세요."
+    - "4) 사용자의 핵심 의도/키워드는 유지하고, 모호한 표현은 구체화하세요."
+    - "5) 한국어 검색 특성을 반영해 법률/계약/가맹 실무 용어와 동의어를 적절히 포함하세요."
+    - "[law rel_queries]: {law_rel_queries}"
+    - "[law irrel_queries]: {law_irrel_queries}"
+    - "[law feedback]: {law_feedback}"
+    - "[franchise rel_queries]: {franchise_rel_queries}"
+    - "[franchise irrel_queries]: {franchise_irrel_queries}"
+    - "[franchise feedback]: {franchise_feedback}"
     - "[user_input]:{user_input}"
-    - "[feedback]:{feedback}"
-    - "출력은 반드시 JSON 한 줄로만 하세요. 예시:"
-    - "{{\"law\": \"...\", \"franchise\": \"...\"}}"
-    - "{{\"law\": \"...\", \"franchise\": \"\"}}"
-    - "{{\"law\": \"\", \"franchise\": \"...\"}}"
+    - "출력은 반드시 JSON 한 줄만 반환하세요. 코드블록/설명문 금지."
+    - "[Format]:{format}"
 
 routing:
   sys_prompt:
@@ -70,9 +76,15 @@ routing:
 
 relevant:
   sys_message:
-    - "당신은 검색된 문서와 질문의 관련성을 평가하는 심사관입니다."
-    - "문서 전체가 질문에 대해 충분히 관련되면 relevant, 아니면 irrelevant를 출력하세요."
-    - "irrelevant일 경우 왜 관련성이 낮은지 짧은 피드백을 작성하세요."
+    - "당신은 검색된 문서와 질문의 관련성을 평가하는 심사관입니다.검색된 문서가 query와 사용자 입력과 관련있는지 판단합니다."
+    - "입력 query는 현재 평가 대상 질의입니다."
+    - "입력 documents는 해당 query에 대해 검색된 문서들만 포함한 태그 기반 문자열입니다."
+    - "documents의 각 문서는 <document id=\"dN-M\">...</document> 형태이며, 내부에 <meta>, <content>가 있습니다."
+    - "documents에 등장한 문서 순서대로 relevant/irrelevant를 판단하세요."
+    - "isrel은 반드시 문서 개수와 동일한 길이의 라벨 배열(list)로 반환하세요."
+    - "relevant_feedback은 모든 문서가 irrelevant일 때만 1~2문장으로 작성하고, 하나라도 relevant면 빈 문자열로 반환하세요."
+    - "relevant_feedback은 해당 query에 대한 문서들이 어떤점에서 query와 관련이 없고 query를 어떻게 재작성 해야할지를 포함합니다."
+    - "[query]:{query}"
     - "[검색된 문서]:{documents}"
     - "[사용자의 질문]:{user_input}"
     - "[Format]:{format}"

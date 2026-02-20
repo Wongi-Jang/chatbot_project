@@ -5,8 +5,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from rich.console import Console
 from rich.markdown import Markdown
 
-
-from helper import build_vector_store, render_text_with_graphs
+from cli_args import parse_graph_args
+from helper import build_vector_store, set_retriever_mode, render_text_with_graphs
 from state import GraphState
 from node import (
     routing,
@@ -20,7 +20,6 @@ from node import (
     requery,
     user_input,
     summarize,
-    set_retriever_mode,
 )
 from conditions import (
     decision,
@@ -100,15 +99,9 @@ def _extract_answer_text(event: dict) -> str | None:
 
 
 def create_graph(
-    enable_scoring: bool = False,
-    retriever_mode: str = "basic",
-    force_rebuild_parent: bool = False,
-    is_interactive: bool = True,
-) -> object:
-    set_retriever_mode(
-        retriever_mode,
-        force_rebuild_parent=force_rebuild_parent,
-    )
+    enable_scoring=True, retriever_mode="basic", is_web=False, checkpointer=None
+):
+    set_retriever_mode(retriever_mode, force_rebuild=False)
 
     nodes = {
         "routing": routing,
@@ -119,24 +112,34 @@ def create_graph(
         "supporting": supporting,
         "answer": answering,
         "requery": requery,
-        "user_input": user_input,
         "summarize": summarize,
     }
     if enable_scoring:
         nodes["scoring"] = scoring
 
+    if not is_web:
+        nodes["user_input"] = user_input
+
     pipeline = PipelineManager(GraphState, nodes)
 
-    pipeline.add_edge(START, "user_input")
+    if is_web:
+        # Web Mode: Request-Response driven
+        pipeline.add_edge(START, "routing")
+        pipeline.add_edge("summarize", END)
+    else:
+        # CLI Mode: Infinite Input Loop
+        pipeline.add_edge(START, "user_input")
+        pipeline.add_conditional_edges(
+            "user_input",
+            is_quit,
+            {
+                True: END,
+                False: "routing",
+            },
+        )
+        pipeline.add_edge("summarize", "user_input")
 
-    pipeline.add_conditional_edges(
-        "user_input",
-        is_quit,
-        {
-            True: END,
-            False: "routing",
-        },
-    )
+    # Common Logic
     pipeline.add_conditional_edges(
         "routing",
         should_retrieve,
@@ -145,9 +148,11 @@ def create_graph(
             False: "answer",
         },
     )
+
     pipeline.add_edge("query_gen", "retrieve")
     pipeline.add_edge("retrieve", "rerank")
     pipeline.add_edge("rerank", "relevant")
+
     pipeline.add_conditional_edges(
         "relevant",
         relevant_decision,
@@ -156,6 +161,7 @@ def create_graph(
             "requery": "requery",
         },
     )
+
     if enable_scoring:
         pipeline.add_conditional_edges(
             "answer",
@@ -198,79 +204,40 @@ def create_graph(
                 "scoring": "summarize",
             },
         )
-    if is_interactive:
-        pipeline.add_edge("summarize", "user_input")
-    else:
-        pipeline.add_edge("summarize", END)
-
     pipeline.add_edge("requery", "retrieve")
 
-    memory = MemorySaver()
-    app = pipeline.compile(checkpointer=memory)
-    return app
+    return pipeline.compile(checkpointer=checkpointer)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="graph pipeline")
-    parser.add_argument("--store", action="store_true", help="initialize Chroma DB")
-    parser.add_argument(
-        "--scoring",
-        action="store_true",
-        help="enable scoring node in pipeline",
-    )
-    parser.add_argument(
-        "--docs",
-        action="store_true",
-        help="print docs-related events in stream output",
-    )
-    parser.add_argument(
-        "--summary",
-        action="store_true",
-        help="print summarize events in stream output",
-    )
-    parser.add_argument(
-        "--answer",
-        action="store_true",
-        help="print answer events only",
-    )
-    parser.add_argument(
-        "--retriever",
-        choices=["basic", "parent"],
-        default="basic",
-        help="retrieval backend mode",
-    )
-    parser.add_argument(
-        "--rebuild-parent",
-        action="store_true",
-        help="rebuild parent retriever index from source PDFs",
-    )
-    parser.add_argument(
-        "--max-nodes",
-        type=int,
-        default=1000,
-        help="maximum number of nodes to execute per run",
-    )
-    args = parser.parse_args()
-
-    if args.max_nodes <= 0:
-        parser.error("--max-nodes must be a positive integer")
+    args = parse_graph_args()
 
     if args.store:
         build_vector_store(True)
         raise SystemExit(0)
 
+    # set_retriever_mode is called inside create_graph, but for main we might want explicitly pass args
+    # actually create_graph handles it.
+
+    memory = MemorySaver()
     app = create_graph(
         enable_scoring=args.scoring,
         retriever_mode=args.retriever,
-        force_rebuild_parent=args.rebuild_parent,
+        is_web=False,
+        checkpointer=memory,
     )
+
+    # Visualization (re-instantiate pipeline manager logic or abstract it?
+    # pipeline.save_png("graph_img.png") - create_graph returns compiled graph directly.
+    # To save PNG we need the state graph object before compile or extract it.
+    # For now, let's skip saving PNG in main execution or do it via graph getter
     try:
         img_data = app.get_graph().draw_mermaid_png()
         with open("graph_img.png", "wb") as f:
             f.write(img_data)
-        print("그래프 이미지가 저장되었습니다!")
-    except Exception as e:
-        print(f"시각화 실패: {e}")
+        print("Graph image saved to graph_img.png")
+    except Exception:
+        pass
     config = {
         "configurable": {"thread_id": "user_session_1"},
         "recursion_limit": args.max_nodes,

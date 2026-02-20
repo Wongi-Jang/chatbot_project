@@ -21,13 +21,19 @@ def is_quit(state: GraphState) -> bool:
     return state["question"] == "exit" or state["question"] == "quit"
 
 
-
 def should_retrieve(state: GraphState) -> bool:
     return bool(state.get("do_retrieve"))
 
 
+# def relevant_decision(state: GraphState) -> str:
+#     if state.get("isrel") == "irrelevant":
+#         return "requery"
+#     return "answer"
+
+
 def relevant_decision(state: GraphState) -> str:
-    if state.get("isrel") == "irrelevant":
+    query_state = state.get("query_state") or {}
+    if not query_state or not all(query_state.values()):
         return "requery"
     return "answer"
 

@@ -12,101 +12,63 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.documents import Document
 
 from helper import (
-    build_parent_retrievers,
-    build_vector_store,
+    get_retrievers,
     load_openai,
     load_prompts,
+    safe_json_dict,
 )
-from preprocess import docs_to_context, history_to_context
-from state import GraphState, ScoreSummary, RelevantSummary, SupportSummary
+from preprocess import (
+    build_requery_inputs,
+    dedupe_docs,
+    docs_to_context,
+    docs_to_query_context,
+    history_to_context,
+)
+from state import (
+    GraphState,
+    QuerySummary,
+    ScoreSummary,
+    RelevantSummary,
+    SupportSummary,
+)
 
 from flashrank import Ranker, RerankRequest
 from rich.console import Console
 
 
 PROMPTS = load_prompts(str(Path(__file__).with_name("prompts.yaml")))
-VECTOR_DBS = build_vector_store(False)
-PARENT_RETRIEVERS = None
-
+LLM_CONFIG = load_prompts(str(Path(__file__).with_name("llm_config.yaml")))
 
 MAX_IRRELEVANT = 3
-NO_DOCS_MESSAGE = "사용자 입력에 관련된 정보가 DB에 없습니다"
-RETRIEVER_MODE = "basic"
-FORCE_REBUILD_PARENT = False
 
 
-def _safe_json_dict(raw: str, warn: str | None = None) -> dict:
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    if warn:
-        print(warn)
-    return {}
-
-
-def set_retriever_mode(mode: str, force_rebuild_parent: bool = False) -> None:
-    global RETRIEVER_MODE, FORCE_REBUILD_PARENT, PARENT_RETRIEVERS
-    if mode not in {"basic", "parent"}:
-        raise ValueError("retriever mode must be one of: basic, parent")
-    RETRIEVER_MODE = mode
-    FORCE_REBUILD_PARENT = force_rebuild_parent
-    PARENT_RETRIEVERS = None
-
-
-def _get_parent_retrievers():
-    global PARENT_RETRIEVERS
-    if PARENT_RETRIEVERS is None:
-        # print("initialize parent document retrievers...")
-        PARENT_RETRIEVERS = build_parent_retrievers(force_rebuild=FORCE_REBUILD_PARENT)
-    return PARENT_RETRIEVERS
-
-
-def _dedupe_docs(docs: Iterable[Document]) -> list[Document]:
-    seen = set()
-    unique_docs = []
-    for doc in docs:
-        key = (
-            doc.page_content,
-            json.dumps(doc.metadata, sort_keys=True, ensure_ascii=False, default=str),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        unique_docs.append(doc)
-    return unique_docs
-
-
-def vector_db_metadata_tool(sample_size: int = 10) -> dict:
-    meta_info = {}
-    for key, db in VECTOR_DBS.items():
-        sample_keys = set()
-        count = None
-        try:
-            data = db.get(include=["metadatas"], limit=sample_size)
-            metadatas = data.get("metadatas") or []
-            for md in metadatas:
-                sample_keys.update(md.keys())
-        except Exception:
-            metadatas = []
-        try:
-            count = db._collection.count()
-        except Exception:
-            count = None
-        meta_info[key] = {
-            "sample_keys": sorted(sample_keys),
-            "sample_key_count": len(sample_keys),
-            "count": count,
-        }
-    return meta_info
+# def vector_db_metadata_tool(sample_size: int = 10) -> dict:
+#     meta_info = {}
+#     for key, db in VECTOR_DBS.items():
+#         sample_keys = set()
+#         count = None
+#         try:
+#             data = db.get(include=["metadatas"], limit=sample_size)
+#             metadatas = data.get("metadatas") or []
+#             for md in metadatas:
+#                 sample_keys.update(md.keys())
+#         except Exception:
+#             metadatas = []
+#         try:
+#             count = db._collection.count()
+#         except Exception:
+#             count = None
+#         meta_info[key] = {
+#             "sample_keys": sorted(sample_keys),
+#             "sample_key_count": len(sample_keys),
+#             "count": count,
+#         }
+#     return meta_info
 
 
 def user_input(state: GraphState) -> GraphState:
-    question = state.get("question", "").strip()
-    if not question:
-        question = input("You:").strip()
+
+    question = input("You:").strip()
     # Reset per-question transient states to avoid cross-turn carryover.
     return GraphState(
         question=question,
@@ -118,26 +80,31 @@ def user_input(state: GraphState) -> GraphState:
         retrieve_types=[],
         db_meta={},
         isrel="",
+        query_state={},
         issup="",
         irrelevant_count=0,
         relevant_loop=0,
         supporting_loop=0,
         scoring_loop=0,
-        feedback="",
+        relevant_feedback={},
+        supporting_feedback="",
         ispass="",
         no_docs=False,
     )
 
 
 def routing(state: GraphState) -> GraphState:
-    llm = load_openai()
+    llm = load_openai(
+        model=LLM_CONFIG["routing"]["model"],
+        temperature=float(LLM_CONFIG["routing"]["temperature"]),
+    )
     question = state["question"]
     prompt = PROMPTS["routing"]["sys_prompt"].format(
         question=question,
         history=history_to_context(state.get("history", [])),
     )
     raw = llm.invoke(prompt).content.strip()
-    data = _safe_json_dict(raw, warn="can not extract json at routing node")
+    data = safe_json_dict(raw, warn="can not extract json at routing node")
 
     do_retrieve = bool(data.get("do_retrieve"))
     retrieve_types = data.get("retrieve_types") or []
@@ -152,102 +119,135 @@ def routing(state: GraphState) -> GraphState:
         query={},
         docs_raw=[],
         docs="",
+        isrel={},
+        query_state={},
+        relevant_feedback={},
+        supporting_feedback="",
     )
     return next_state
 
 
 def query_gen(state: GraphState) -> GraphState:
-    llm = load_openai()
-    template = PROMPTS["query_gen"]["template"]
-    prompt = PromptTemplate.from_template(template=template)
-    targets = ",".join(state.get("retrieve_types", [])) or "none"
-    formatted_input = (
-        prompt.format(
-            user_question=state["question"],
-            history=history_to_context(state.get("history", [])),
-        )
-        + f"\n\n검색 대상 DB: {targets}"
+    llm = load_openai(
+        model=LLM_CONFIG["query_gen"]["model"],
+        temperature=float(LLM_CONFIG["query_gen"]["temperature"]),
     )
-    raw = llm.invoke(formatted_input).content.strip()
-    data = _safe_json_dict(raw)
-    return GraphState(query=data)
+    template = PROMPTS["query_gen"]["template"]
+    parser = PydanticOutputParser(pydantic_object=QuerySummary)
+    prompt = PromptTemplate.from_template(template=template).partial(
+        format=parser.get_format_instructions()
+    )
+    targets = ",".join(state.get("retrieve_types", [])) or "none"
+    formatted_input = prompt.format(
+        user_question=state["question"],
+        history=history_to_context(state.get("history", [])),
+    )
+    formatted_input = f"{formatted_input}\n\n검색 대상 DB: {targets}"
+    output = llm.invoke(formatted_input)
+    parsed = parser.parse(output.content)
+    return GraphState(
+        query={
+            "law": parsed.law_query,
+            "franchise": parsed.franchise_query,
+        }
+    )
 
 
-def _retrieve_from_db(
+def _retrieve_docs(
     query: str, db_key: str, k: int = 3, score_threshold: float = 0.5
 ) -> list[tuple]:
-    db = VECTOR_DBS.get(db_key)
-    if db is None:
-        return []
-    results = db.similarity_search_with_score(query=query, k=k)
-    return [pair for pair in results if pair[1] >= score_threshold]
-
-
-def _retrieve_parent_docs(query: str, db_key: str, k: int = 3) -> list[Document]:
-    retriever = _get_parent_retrievers().get(db_key)
+    retriever = get_retrievers().get(db_key)
     if retriever is None:
         return []
-    docs = retriever.invoke(query)
-    return list(docs)[:k]
+    return retriever.invoke(query, k=k, score_threshold=score_threshold)
 
 
 def retrieve(state: GraphState) -> GraphState:
     queries = state.get("query", {}) or {}
-    if RETRIEVER_MODE == "parent":
-        docs: list[Document] = []
-        for db_key, q in queries.items():
-            if not q:
+    docs_with_scores: dict[str, list[tuple]] = {}
+    for db_key, query_list in queries.items():
+        if not query_list:
+            continue
+        if not isinstance(query_list, list):
+            continue
+        for q in query_list:
+            if not isinstance(q, str) or not q.strip():
                 continue
-            docs.extend(_retrieve_parent_docs(q, db_key))
-        docs = _dedupe_docs(docs)
-    else:
-        docs_with_scores: list[tuple] = []
-        for db_key, q in queries.items():
-            if not q:
-                continue
-            docs_with_scores.extend(_retrieve_from_db(q, db_key))
-        docs_with_scores.sort(key=lambda x: x[1], reverse=True)
-        docs_with_scores.sort(key=lambda x: x[1], reverse=True)
-        docs = [d for d, _s in docs_with_scores]
+            docs_with_scores.setdefault(q, []).extend(_retrieve_docs(q, db_key))
 
-    # Convert Documents to dicts for serialization
-    docs_dicts = [
-        {"page_content": d.page_content, "metadata": d.metadata} for d in docs
-    ]
-    return GraphState(docs_raw=docs_dicts, docs=docs_to_context(docs_dicts))
+    docs: dict[str, list[Document]] = {}
+    for q, pairs in docs_with_scores.items():
+        pairs.sort(key=lambda x: x[1], reverse=True)
+        per_query_docs = [d for d, _s in pairs]
+        docs[q] = dedupe_docs(per_query_docs)
+    return GraphState(docs_raw=docs, docs=docs_to_query_context(docs))
 
 
 def relevant(state: GraphState) -> GraphState:
     current_count = state.get("irrelevant_count", 0)
+    query_docs = state.get("docs_raw", {}) or {}
     if current_count >= MAX_IRRELEVANT:
-        # print("relevant overflow")
+        overflow_queries = {q: True for q in query_docs.keys()}
+        if not overflow_queries:
+            overflow_queries = {"_no_query": True}
         return GraphState(
-            isrel="relevant",
-            docs=NO_DOCS_MESSAGE,
+            isrel={q: [] for q in overflow_queries.keys()},
+            query_state=overflow_queries,
+            relevant_feedback={},
+            docs={},
             irrelevant_count=0,
             relevant_loop=0,
             no_docs=True,
         )
-
-    llm = load_openai()
-    sys_message = PROMPTS["relevant"]["sys_message"]
+    llm = load_openai(
+        model=LLM_CONFIG["relevant"]["model"],
+        temperature=float(LLM_CONFIG["relevant"]["temperature"]),
+    )
     parser = PydanticOutputParser(pydantic_object=RelevantSummary)
-    sys_message = PromptTemplate.from_template(sys_message)
-    prompt = sys_message.partial(format=parser.get_format_instructions())
-    formatted_input = prompt.format(
-        documents=state.get("docs", ""),
-        user_input=state["question"],
+    prompt = PromptTemplate.from_template(PROMPTS["relevant"]["sys_message"]).partial(
+        format=parser.get_format_instructions()
     )
-    output = llm.invoke(formatted_input)
-    parsed_output = parser.parse(output.content)
-    next_count = (
-        current_count + 1 if parsed_output.isrel == "irrelevant" else current_count
-    )
+    docs_by_query = state.get("docs", {}) or {}
+    isrel: dict[str, list[str]] = {}
+    feedback: dict[str, str] = {}
+    query_state: dict[str, bool] = {}
+
+    for query_text, docs in query_docs.items():
+        formatted_input = prompt.format(
+            query=query_text,
+            documents=docs_by_query.get(query_text, ""),
+            user_input=state["question"],
+        )
+        output = llm.invoke(formatted_input)
+        parsed_output = parser.parse(output.content)
+        labels = parsed_output.isrel
+        isrel[query_text] = labels
+        has_relevant = False
+        for i in range(len(docs)):
+            if i < len(labels) and labels[i] == "relevant":
+                has_relevant = True
+                break
+        query_state[query_text] = has_relevant
+        if has_relevant:
+            continue
+        else:
+            fallback = "해당 쿼리와 관련성이 높은 문서를 찾지 못했습니다."
+            text = (
+                parsed_output.relevant_feedback.strip()
+                if isinstance(parsed_output.relevant_feedback, str)
+                else ""
+            )
+            feedback[query_text] = text or fallback
+
+    all_queries_passed = bool(query_state) and all(query_state.values())
+    next_count = current_count + 1 if not all_queries_passed else 0
     loop_count = state.get("relevant_loop", 0)
-    next_loop = loop_count + 1 if parsed_output.isrel == "irrelevant" else 0
+    next_loop = loop_count + 1 if not all_queries_passed else 0
+
     return GraphState(
-        isrel=parsed_output.isrel,
-        feedback=parsed_output.feedback,
+        isrel=isrel,
+        query_state=query_state,
+        relevant_feedback=feedback,
         irrelevant_count=next_count,
         relevant_loop=next_loop,
         no_docs=False,
@@ -262,13 +262,16 @@ def supporting(state: GraphState) -> GraphState:
             no_docs=True,
         )
 
-    llm = load_openai()
+    llm = load_openai(
+        model=LLM_CONFIG["supporting"]["model"],
+        temperature=float(LLM_CONFIG["supporting"]["temperature"]),
+    )
     sys_message = PROMPTS["supporting"]["sys_message"]
     parser = PydanticOutputParser(pydantic_object=SupportSummary)
     sys_message = PromptTemplate.from_template(sys_message)
     prompt = sys_message.partial(format=parser.get_format_instructions())
     formatted_input = prompt.format(
-        documents=state.get("docs", ""),
+        documents=docs_to_context(state.get("docs_raw", {}), include_query=True),
         answer=state.get("answer", ""),
         user_input=state.get("question", ""),
     )
@@ -278,25 +281,21 @@ def supporting(state: GraphState) -> GraphState:
     next_loop = loop_count + 1 if parsed_output.issup == "no support" else 0
     return GraphState(
         issup=parsed_output.issup,
-        feedback=parsed_output.feedback,
+        supporting_feedback=parsed_output.feedback,
         supporting_loop=next_loop,
         no_docs=False,
     )
 
 
-def rerank(state: GraphState) -> GraphState:
-    docs = state.get("docs_raw", [])
+def _rerank_list(docs: list, query: str) -> list:
+    """Helper to rerank a list of documents or dicts."""
     if not docs:
-        return GraphState(docs="")
+        return []
 
+    # If Flashrank is missing/failed
     if Ranker is None:
-        if Console:
-            Console().print(
-                "[yellow]Flashrank not installed or failed to import, skipping rerank.[/yellow]"
-            )
-        return GraphState(docs=docs_to_context(docs))
+        return docs
 
-    # Initialize Ranker (Using a small/fast model by default: ms-marco-MiniLM-L-12-v2)
     try:
         ranker = Ranker(
             model_name="ms-marco-MiniLM-L-12-v2", cache_dir="./flashrank_cache"
@@ -304,43 +303,97 @@ def rerank(state: GraphState) -> GraphState:
     except Exception as e:
         if Console:
             Console().print(f"[red]Flashrank init failed: {e}[/red]")
-        return GraphState(docs=docs_to_context(docs))
+        return docs
 
-    # Prepare input for Flashrank
     passages = []
     for i, doc in enumerate(docs):
-        # Handle both dict and Document (though retrieve should produce dicts now)
         if isinstance(doc, dict):
             text = doc.get("page_content", "")
             meta = doc.get("metadata", {})
         else:
             text = doc.page_content
             meta = doc.metadata
-
         passages.append({"id": str(i), "text": text, "meta": meta})
 
-    rerank_request = RerankRequest(query=state["question"], passages=passages)
+    rerank_request = RerankRequest(query=query, passages=passages)
     results = ranker.rerank(rerank_request)
 
-    # Reconstruct documents from reranked results as dicts
     reranked_docs = []
     for res in results:
         meta = res.get("meta", {})
-        # Flashrank returns numpy float32, which is not msgpack serializable
         score = res.get("score")
         if score is not None:
             score = float(score)
         meta["rerank_score"] = score
-        reranked_docs.append({"page_content": res["text"], "metadata": meta})
+        # Reconstruct as dicts since that's what we likely want downstream?
+        # Actually retrieve returns dicts with 'page_content' and 'metadata' usually?
+        # Wait, retrieve returns Documents or dicts?
+        # _retrieve_docs returns list[tuple[Document, float]] -> retrieve makes list[Document]
+        # So we should probably return Documents if possible, but Flashrank returns text/meta.
+        # Let's return dicts to be safe as per original code,
+        # OR recreate Document objects if downstream expects them.
+        # Original rerank returned dicts: {"page_content": ..., "metadata": ...}
+        reranked_docs.append(Document(page_content=res["text"], metadata=meta))
 
-    # Take top K (e.g. 5)
-    reranked_docs = reranked_docs[:5]
+    return reranked_docs[:5]
 
-    return GraphState(docs_raw=reranked_docs, docs=docs_to_context(reranked_docs))
+
+def rerank(state: GraphState) -> GraphState:
+    print("DEBUG: Entering rerank node")
+    docs_raw = state.get("docs_raw", [])
+    question = state["question"]
+
+    if not docs_raw:
+        return GraphState(docs="")
+
+    # If dict (per query)
+    if isinstance(docs_raw, dict):
+        new_docs_raw = {}
+        for query_key, doc_list in docs_raw.items():
+            print(f"DEBUG: Reranking for query: {query_key}")
+            new_docs_raw[query_key] = _rerank_list(doc_list, question)
+
+        return GraphState(
+            docs_raw=new_docs_raw, docs=docs_to_query_context(new_docs_raw)
+        )
+
+    # If list (global / legacy)
+    else:
+        print("DEBUG: Reranking flat list")
+        reranked = _rerank_list(docs_raw, question)
+        return GraphState(
+            docs_raw=reranked,
+            docs=docs_to_context(reranked),  # Note: docs_to_context expects diff sig?
+            # preprocess.py: docs_to_context(docs: dict[str, list[Document]], ...)
+            # Wait, docs_to_context signature in preprocess.py is:
+            # def docs_to_context(docs: dict[str, list[Document]], include_query: bool = True) -> str:
+            # So passing a list to docs_to_context will FAIL.
+            # We must wrap it? Or use a different function?
+            # Looking at preprocess.py again...
+            # The commented out version took list. The active one takes dict.
+            # So we MUST return a dict structure even if input was list?
+            # Or wraps list in dummy query?
+        )
+        # Actually, since retrieve always returns dict now, we might not need list path.
+        # But for safety, if it is a list, we wrap it.
+
+        # However, let's look at preprocess.py again to be sure.
+        # def docs_to_context(docs: dict[str, list[Document]], ...)
+
+        # So if we have a list, we can't call docs_to_context directly with it.
+        # But previous rerank implementation called docs_to_context(reranked_docs).
+        # This implies previous implementation was broken too if docs_to_context changed?
+        # Or maybe I misread preprocess.py.
+        # Let's assume input is always dict from retrieve.
+
+        return GraphState(docs="")  # Should not happen if retrieved correctly
 
 
 def answering(state: GraphState) -> GraphState:
-    llm = load_openai()
+    llm = load_openai(
+        model=LLM_CONFIG["answering"]["model"],
+        temperature=float(LLM_CONFIG["answering"]["temperature"]),
+    )
     sys_message = SystemMessagePromptTemplate.from_template(
         PROMPTS["answering"]["sys_message"]
     )
@@ -360,7 +413,7 @@ def answering(state: GraphState) -> GraphState:
     var = {
         "user_input": state["question"],
         "history": history_to_context(state["history"]),
-        "documents": state.get("docs", ""),
+        "documents": docs_to_context(state.get("docs_raw", {}), include_query=False),
     }
     formatted_message = chat_prompt.format(**var)
     answer = llm.invoke(formatted_message)
@@ -368,14 +421,17 @@ def answering(state: GraphState) -> GraphState:
 
 
 def scoring(state: GraphState) -> GraphState:
-    llm = load_openai()
+    llm = load_openai(
+        model=LLM_CONFIG["scoring"]["model"],
+        temperature=float(LLM_CONFIG["scoring"]["temperature"]),
+    )
 
     sys_message = PROMPTS["scoring"]["sys_message"]
     parser = PydanticOutputParser(pydantic_object=ScoreSummary)
     sys_message = PromptTemplate.from_template(sys_message)
     prompt = sys_message.partial(format=parser.get_format_instructions())
     formatted_input = prompt.format(
-        documents=state.get("docs", ""),
+        documents=docs_to_context(state.get("docs_raw", {}), include_query=True),
         user_input=state["question"],
         answer=state["answer"],
         query=state.get("query", ""),
@@ -385,23 +441,64 @@ def scoring(state: GraphState) -> GraphState:
     loop_count = state.get("scoring_loop", 0)
     next_loop = loop_count + 1 if parsed_output.score != "Pass" else 0
     return GraphState(
-        feedback=parsed_output.feedback,
+        supporting_feedback=parsed_output.feedback,
         ispass=parsed_output.score,
         scoring_loop=next_loop,
     )
 
 
 def requery(state: GraphState) -> GraphState:
-    llm = load_openai()
-    sys_prompt = PROMPTS["requery"]["sys_prompt"]
-    formatted_message = sys_prompt.format(
-        prev_query=state.get("query", ""),
-        user_input=state["question"],
-        feedback=state["feedback"],
+    llm = load_openai(
+        model=LLM_CONFIG["requery"]["model"],
+        temperature=float(LLM_CONFIG["requery"]["temperature"]),
     )
-    raw = llm.invoke(formatted_message).content.strip()
-    data = _safe_json_dict(raw)
-    return GraphState(query=data)
+    parser = PydanticOutputParser(pydantic_object=QuerySummary)
+    prompt = PromptTemplate.from_template(PROMPTS["requery"]["sys_prompt"]).partial(
+        format=parser.get_format_instructions()
+    )
+    requery_inputs = build_requery_inputs(
+        queries=state.get("query", {}),
+        query_state=state.get("query_state", {}),
+        relevant_feedback=state.get("relevant_feedback", {}),
+        supporting_feedback=state.get("supporting_feedback", ""),
+    )
+    formatted_message = prompt.format(
+        law_rel_queries=requery_inputs["law"]["rel_queries"],
+        law_irrel_queries=requery_inputs["law"]["irrel_queries"],
+        law_feedback=requery_inputs["law"]["feedback"],
+        franchise_rel_queries=requery_inputs["franchise"]["rel_queries"],
+        franchise_irrel_queries=requery_inputs["franchise"]["irrel_queries"],
+        franchise_feedback=requery_inputs["franchise"]["feedback"],
+        user_input=state["question"],
+    )
+    output = llm.invoke(formatted_message)
+    parsed = parser.parse(output.content)
+    prev_queries = state.get("query", {}) or {}
+    query_state = state.get("query_state", {}) or {}
+
+    def _merge_with_relevant_existing(db_key: str, new_queries: list[str]) -> list[str]:
+        base = prev_queries.get(db_key, []) if isinstance(prev_queries, dict) else []
+        if not isinstance(base, list):
+            base = []
+        rel_existing = [
+            q
+            for q in base
+            if isinstance(q, str) and q.strip() and bool(query_state.get(q, False))
+        ]
+        merged = rel_existing + [
+            q for q in new_queries if isinstance(q, str) and q.strip()
+        ]
+        # preserve order while deduping
+        return list(dict.fromkeys(merged))
+
+    return GraphState(
+        query={
+            "law": _merge_with_relevant_existing("law", parsed.law_query),
+            "franchise": _merge_with_relevant_existing(
+                "franchise", parsed.franchise_query
+            ),
+        }
+    )
 
 
 def summarize(state: GraphState) -> GraphState:

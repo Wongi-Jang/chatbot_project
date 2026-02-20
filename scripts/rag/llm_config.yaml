@@ -1,0 +1,27 @@
+routing:
+  model: gpt-4o-mini
+  temperature: 0.5
+
+query_gen:
+  model: gpt-4o-mini
+  temperature: 0.5
+
+relevant:
+  model: gpt-4o-mini
+  temperature: 0.5
+
+supporting:
+  model: gpt-4o-mini
+  temperature: 0.5
+
+answering:
+  model: gpt-4o-mini
+  temperature: 0.5
+
+scoring:
+  model: gpt-4o-mini
+  temperature: 0.5
+
+requery:
+  model: gpt-4o-mini
+  temperature: 0.5

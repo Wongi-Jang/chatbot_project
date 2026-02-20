@@ -2,11 +2,11 @@ import streamlit as st
 import sys
 import json
 import pandas as pd
+import time
 from pathlib import Path
 
 # Add the current directory and the rag scripts directory to sys.path
 sys.path.append(str(Path(__file__).parent))
-# sys.path.append(str(Path(__file__).parent / "scripts" / "rag"))
 
 from graph_base import create_graph
 from helper import (
@@ -52,20 +52,16 @@ with st.sidebar:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "app" not in st.session_state:
-    # We re-create the graph only when config changes would be ideal,
-    # but for simplicity we can recreate it or store it.
-    # Storing it is better.
-    pass
-
-# Always create/update the app based on current config
-# (In a real app, you might want to detect changes to avoid rebuilding unnecessary)
-app = create_graph(
-    enable_scoring=enable_scoring, retriever_mode=retriever_mode, is_interactive=False
-)
-
 if "app_state" not in st.session_state:
     st.session_state.app_state = {"history": []}
+
+
+# Always create/update the app based on current config
+app = create_graph(
+    enable_scoring=enable_scoring,
+    retriever_mode=retriever_mode,
+    is_web=True,
+)
 
 # Simple thread ID for memory
 config = {"configurable": {"thread_id": "streamlit_user"}}
@@ -122,29 +118,50 @@ if prompt := st.chat_input("What would you like to know?"):
         full_response = ""
         segments = []
 
-        # Prepare input state
-        # We need to pass history if we want context.
-        # But MemorySaver checkpointing might handle persistence if thread_id is used.
-        # graph_base.py uses MemorySaver.
-
-        # We pass the current question.
-        inputs = {"question": prompt}
-
-        # Stream the graph
-        # We want to capture the "answer" node output.
-        # And also intermediate steps if we want to debug, but mainly the answer.
+        # RESET State for new question (Critical for stateless-like behavior in loops)
+        # We manually initialize the state similar to 'user_input' node
+        inputs = {
+            "question": prompt,
+            "query": {},
+            "docs_raw": [],
+            "docs": "",
+            "answer": "",
+            "do_retrieve": False,
+            "retrieve_types": [],
+            "db_meta": {},
+            "isrel": "",
+            "query_state": {},
+            "issup": "",
+            "irrelevant_count": 0,
+            "relevant_loop": 0,
+            "supporting_loop": 0,
+            "scoring_loop": 0,
+            "relevant_feedback": {},
+            "supporting_feedback": "",
+            "ispass": "",
+            "no_docs": False,
+            # We pass history if needed, LangGraph memory handles persistence usually,
+            # but we can pass explicit history if the graph logic relies on state["history"]
+            "history": st.session_state.app_state["history"],
+        }
 
         try:
+            start_time = time.time()
+            last_node_time = start_time
+
             for event in app.stream(inputs, config=config):
+                current_time = time.time()
+                duration = current_time - last_node_time
+                last_node_time = current_time
+
                 # event is a dict of node_name -> state_update
 
-                # If we get an answer event
+                # Check for answer update
                 if "answer" in event:
                     answer_state = event["answer"]
                     answer = answer_state.get("answer", "")
                     if answer:
                         full_response = answer
-                        # Render graphs if any
                         segments = render_text_with_graphs(answer)
 
                         # Display
@@ -161,20 +178,16 @@ if prompt := st.chat_input("What would you like to know?"):
 
                                         st.caption(title)
 
-                                        # Prepare data for Streamlit charts (Index=X, Columns=Series)
                                         df_data = {}
                                         x_labels = []
 
                                         if series_list:
-                                            # Assume all series share the same X labels for simplicity
-                                            # Only take the FIRST set of X labels to align the DataFrame
                                             x_labels = series_list[0].get("x", [])
                                             df_data["x"] = x_labels
 
                                             for series in series_list:
                                                 label = series.get("label", "Data")
                                                 y_values = series.get("y", [])
-                                                # Ensure lengths match
                                                 if len(y_values) == len(x_labels):
                                                     df_data[label] = y_values
 
@@ -191,17 +204,28 @@ if prompt := st.chat_input("What would you like to know?"):
                                 else:
                                     st.code(seg["content"], language="text")
 
-                # We could also show status updates like "Searching..." if we check other events
-                if "retrieve" in event:
-                    with st.status("Retrieving information...", expanded=False):
-                        st.write("Documents retrieved.")
-                        # st.write(event["retrieve"].get("docs", ""))
+                # Simply show status of what node is running
+                # "retrieve", "query_gen", "relevant", etc.
+                for node_name in event:
+                    if node_name != "answer" and node_name != "summarize":
+                        with st.status(
+                            f"Processing: {node_name} ({duration:.2f}s)", expanded=False
+                        ):
+                            st.write(event[node_name])
+
+                # Update history in app state if summarize happened
+                if "summarize" in event:
+                    new_history = event["summarize"].get("history", [])
+                    if new_history:
+                        # Append to our local session state history if needed
+                        # But LangGraph memory might be enough.
+                        # We'll update just in case next turn needs it from input
+                        st.session_state.app_state["history"].extend(new_history)
 
         except Exception as e:
             st.error(f"An error occurred: {e}")
 
         # Add assistant response to history
-        # We store the *segments* to allow re-rendering
         if full_response:
             st.session_state.messages.append(
                 {"role": "assistant", "content": full_response, "segments": segments}
