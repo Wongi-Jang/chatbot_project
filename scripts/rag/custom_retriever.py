@@ -42,7 +42,7 @@ class CustomRetriever:
 
         filtered_children = []
         for child_doc, score in child_results:
-            if score_threshold is not None and score < score_threshold:
+            if score_threshold is not None and score > score_threshold:
                 continue
             filtered_children.append((child_doc, score))
 
@@ -61,7 +61,7 @@ class CustomRetriever:
         if not parent_ids:
             return []
 
-        parent_docs = self.docstore.mget(parent_ids) 
+        parent_docs = self.docstore.mget(parent_ids)
         results: list[tuple[Document, float]] = []
         for parent_id, parent_doc in zip(parent_ids, parent_docs):
             if parent_doc is None:

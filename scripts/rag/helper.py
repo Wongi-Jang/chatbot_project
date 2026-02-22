@@ -3,12 +3,13 @@ import os
 
 import json
 import shutil
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader, PDFPlumberLoader
 from pathlib import Path
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 from typing import TYPE_CHECKING
 from custom_retriever import CustomRetriever
 
@@ -34,7 +35,7 @@ def _load_docs(pdf_root: str, doc_type: str) -> list[Document]:
     all_docs = []
     for file in Path(pdf_root).rglob("*.pdf"):
         brand = file.stem
-        loader = PyPDFLoader(file, mode="page")
+        loader = PDFPlumberLoader(str(file))
         doc = loader.load()
         doc = [
             Document(
@@ -255,6 +256,11 @@ def get_retrievers():
 def load_openai(model="gpt-4o-mini", temperature=0.5):
     OPENAI_API_KEY = load_api_key("OPENAI_API_KEY")
     return ChatOpenAI(model=model, api_key=OPENAI_API_KEY, temperature=temperature)
+
+
+def load_claude(model="claude-3-5-haiku-latest", temperature=0.5):
+    CLAUDE_API_KEY = load_api_key("CLAUDE_API_KEY")
+    return ChatAnthropic(model=model, api_key=CLAUDE_API_KEY, temperature=temperature)
 
 
 def load_prompts(path: str) -> dict:

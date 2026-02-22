@@ -99,7 +99,7 @@ def _extract_answer_text(event: dict) -> str | None:
 
 
 def create_graph(
-    enable_scoring=True, retriever_mode="basic", is_web=False, checkpointer=None
+    enable_scoring=False, retriever_mode="basic", is_web=False, checkpointer=None
 ):
     set_retriever_mode(retriever_mode, force_rebuild=False)
 
@@ -150,8 +150,9 @@ def create_graph(
     )
 
     pipeline.add_edge("query_gen", "retrieve")
-    pipeline.add_edge("retrieve", "rerank")
-    pipeline.add_edge("rerank", "relevant")
+    # pipeline.add_edge("retrieve", "rerank")
+    # pipeline.add_edge("rerank", "relevant")
+    pipeline.add_edge("retrieve", "relevant")
 
     pipeline.add_conditional_edges(
         "relevant",
@@ -175,7 +176,7 @@ def create_graph(
             "supporting",
             support_decision,
             {
-                "answer": "answer",
+                "requery": "requery",
                 "scoring": "scoring",
             },
         )
@@ -200,7 +201,7 @@ def create_graph(
             "supporting",
             support_decision,
             {
-                "answer": "answer",
+                "requery": "requery",
                 "scoring": "summarize",
             },
         )

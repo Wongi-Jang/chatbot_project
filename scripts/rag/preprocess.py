@@ -41,9 +41,15 @@ def docs_to_context(
             brand = d.metadata.get("brand", "")
             page = d.metadata.get("page", "")
             source = d.metadata.get("source", "")
+            score = d.metadata.get("score", "")
+            rerank_score = d.metadata.get("rerank_score", "")
             if source:
                 source = Path(source).name
             meta = f"brand={brand}, page={page}, source={source}"
+            if score != "":
+                meta += f", score={score}"
+            if rerank_score != "":
+                meta += f", rerank_score={rerank_score}"
             doc_open = (
                 f'<document id="d{q_idx}-{d_idx}">\n'
                 if include_query

@@ -14,6 +14,7 @@ from langchain_core.documents import Document
 from helper import (
     get_retrievers,
     load_openai,
+    load_claude,
     load_prompts,
     safe_json_dict,
 )
@@ -160,7 +161,7 @@ def _retrieve_docs(
     query: str,
     db_key: str,
     k: int = 3,
-    score_threshold: float = 0.5,
+    score_threshold: float = 1.5,
     filter: dict | None = None,
 ) -> list[tuple]:
     retriever = get_retrievers().get(db_key)
@@ -218,8 +219,11 @@ def retrieve(state: GraphState) -> GraphState:
 
     docs: dict[str, list[Document]] = {}
     for q, pairs in docs_with_scores.items():
-        pairs.sort(key=lambda x: x[1], reverse=True)
-        per_query_docs = [d for d, _s in pairs]
+        pairs.sort(key=lambda x: x[1], reverse=False)
+        per_query_docs = []
+        for d, s in pairs:
+            d.metadata["score"] = float(f"{s:.4f}")
+            per_query_docs.append(d)
         docs[q] = dedupe_docs(per_query_docs)
     return GraphState(docs_raw=docs, docs=docs_to_query_context(docs))
 
@@ -240,7 +244,7 @@ def relevant(state: GraphState) -> GraphState:
             relevant_loop=0,
             no_docs=True,
         )
-    llm = load_openai(
+    llm = load_claude(
         model=LLM_CONFIG["relevant"]["model"],
         temperature=float(LLM_CONFIG["relevant"]["temperature"]),
     )
@@ -254,6 +258,14 @@ def relevant(state: GraphState) -> GraphState:
     query_state: dict[str, bool] = {}
 
     for query_text, docs in query_docs.items():
+        if not docs:
+            isrel[query_text] = []
+            query_state[query_text] = False
+            feedback[query_text] = (
+                "검색된 문서가 없습니다. 다른 검색어나 조건으로 다시 시도해주세요."
+            )
+            continue
+
         formatted_input = prompt.format(
             query=query_text,
             documents=docs_by_query.get(query_text, ""),
@@ -515,38 +527,46 @@ def requery(state: GraphState) -> GraphState:
     output = llm.invoke(formatted_message)
     parsed = parser.parse(output.content)
     prev_queries = state.get("query", {}) or {}
-    query_state = state.get("query_state", {}) or {}
 
-    def _merge_with_relevant_existing(db_key: str, new_queries: list) -> list:
+    def _filter_prev_queries(db_key: str, new_queries: list) -> list:
         base = prev_queries.get(db_key, []) if isinstance(prev_queries, dict) else []
         if not isinstance(base, list):
             base = []
 
         def get_q_str(item):
-            return item.get("query", "") if isinstance(item, dict) else item
+            if isinstance(item, dict):
+                return item.get("query", "")
+            elif hasattr(item, "query"):
+                return getattr(item, "query")
+            return item
 
-        rel_existing = [
-            item
+        prev_query_strs = {
+            get_q_str(item).strip()
             for item in base
-            if isinstance(get_q_str(item), str)
-            and get_q_str(item).strip()
-            and bool(query_state.get(get_q_str(item), False))
-        ]
+            if isinstance(get_q_str(item), str) and get_q_str(item).strip()
+        }
 
-        merged = rel_existing + new_queries
-
-        seen = set()
+        seen = set(prev_query_strs)
         deduped = []
-        for item in merged:
+        for item in new_queries:
             q_str = get_q_str(item)
             if not isinstance(q_str, str) or not q_str.strip():
                 continue
-            if q_str not in seen:
-                seen.add(q_str)
+
+            clean_str = q_str.strip()
+
+            if clean_str not in seen:
+                seen.add(clean_str)
                 if hasattr(item, "model_dump"):
                     deduped.append(item.model_dump())
                 else:
                     deduped.append(item)
+
+        # If all new queries were dropped due to being exact duplicates, we must force at least one fallback query
+        if not deduped and prev_query_strs:
+            fallback_q = list(prev_query_strs)[0] + " 상세 내용"
+            deduped.append(fallback_q)
+
         return deduped
 
     prev_target_brands = state.get("target_brands", []) or []
@@ -557,10 +577,8 @@ def requery(state: GraphState) -> GraphState:
 
     return GraphState(
         query={
-            "law": _merge_with_relevant_existing("law", parsed.law_query),
-            "franchise": _merge_with_relevant_existing(
-                "franchise", parsed.franchise_query
-            ),
+            "law": _filter_prev_queries("law", parsed.law_query),
+            "franchise": _filter_prev_queries("franchise", parsed.franchise_query),
         },
         target_brands=merged_brands,
     )

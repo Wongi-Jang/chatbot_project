@@ -41,9 +41,11 @@ class FranchiseQuery(BaseModel):
 
 
 class QuerySummary(BaseModel):
-    law_query: list[str] = Field(description="법령 DB 검색용 쿼리 목록")
+    law_query: list[str] = Field(
+        description="법령 DB 검색용 쿼리 목록. 단일 법률 질문이라도 유의어/동의어를 활용해 같은 의미의 다른 쿼리 여러 개를 생성하세요."
+    )
     franchise_query: list[FranchiseQuery] = Field(
-        description="프랜차이즈 DB 검색용 쿼리 및 대상 브랜드 목록"
+        description="프랜차이즈 DB 검색용 쿼리 및 대상 브랜드 목록. 단일 질문이라도 유의어/동의어를 활용해 같은 의미의 다른 쿼리 여러 개를 생성하고, 비교 질문이라면 브랜드별로도 분리해야 합니다."
     )
     target_brands: list[str] = Field(
         description="질문에서 언급된 타겟 프랜차이즈 브랜드 이름 목록 (없으면 빈 리스트)",

@@ -44,6 +44,6 @@ def support_decision(state: GraphState) -> str:
             print("supporting loop overflow")
             state["supporting_loop"] = 0
             return "scoring"
-        return "answer"
+        return "requery"
     state["supporting_loop"] = 0
     return "scoring"

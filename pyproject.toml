@@ -25,4 +25,6 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "plotext>=5.3.2",
     "streamlit>=1.54.0",
+    "langchain-anthropic>=0.3.22",
+    "pdfplumber>=0.11.9",
 ]
